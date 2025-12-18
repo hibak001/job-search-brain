@@ -5,6 +5,40 @@ from core.db import init_db
 from core.db import init_db, add_document, list_resumes
 from core.db import init_db, add_document, list_resumes, add_job, add_application, list_jobs, get_resume_for_job
 
+import re
+
+def parse_company_role(message: str):
+    """
+    Very simple parser.
+    Tries to extract: company and role from common phrasing.
+    Returns (company, role) or (None, None).
+    """
+    msg = message.strip()
+
+    # Pattern: "... for <company> <role>" or "... for <company> - <role>"
+    m = re.search(r"\bfor\s+(.+)$", msg, flags=re.IGNORECASE)
+    if not m:
+        return None, None
+
+    tail = m.group(1).strip()
+
+    # If user uses separators like "-" or "|"
+    if " - " in tail:
+        company, role = tail.split(" - ", 1)
+        return company.strip(), role.strip()
+    if " | " in tail:
+        company, role = tail.split(" | ", 1)
+        return company.strip(), role.strip()
+
+    # Otherwise try: first word chunk = company, rest = role (works ok for many cases)
+    parts = tail.split()
+    if len(parts) < 2:
+        return None, None
+
+    company = parts[0]
+    role = " ".join(parts[1:])
+    return company.strip(), role.strip()
+
 
 
 
@@ -12,7 +46,7 @@ st.set_page_config(page_title="Job Search Brain", layout="wide")
 st.title("Job Search Brain 🤖")
 init_db()
 
-tab_upload, tab_add_app, tab_history = st.tabs(["Upload", "Add Application", "History"])
+tab_upload, tab_add_app, tab_history, tab_chat = st.tabs(["Upload", "Add Application", "History", "Chatbot"])
 
 with tab_upload:
     st.subheader("Upload documents")
@@ -138,3 +172,33 @@ with tab_history:
         for job in rows:
             job_id, company, role, date_applied, status, created_at = job
             st.write(f"**{company} — {role}** | {status} | applied: {date_applied} | job_id: {job_id}")
+
+with tab_chat:
+    st.subheader("Chatbot (Resume lookup)")
+
+    st.write("Ask like: **What resume did I use for Salesforce Associate Product Manager**")
+    st.write("Tip: You can also use: **for Salesforce - Associate Product Manager**")
+
+    user_msg = st.text_input("Your question", placeholder="What resume did I use for Salesforce Associate Product Manager?")
+
+    if st.button("Ask"):
+        company, role = parse_company_role(user_msg)
+
+        if not company or not role:
+            st.warning("I couldn't understand that. Try: `for <Company> - <Role>`")
+        else:
+            result = get_resume_for_job(company, role)
+
+            if not result:
+                st.warning(f"No match found for company='{company}' and role='{role}'.")
+            else:
+                filename, file_path = result
+                st.success(f"You used: {filename}")
+
+                with open(file_path, "rb") as f:
+                    st.download_button(
+                        label="Download that resume",
+                        data=f,
+                        file_name=filename,
+                        mime="application/pdf" if filename.lower().endswith(".pdf") else "application/octet-stream",
+                    )
