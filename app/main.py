@@ -1,11 +1,22 @@
 import streamlit as st
 import os
-from core.extract_text import extract_text
-from core.db import init_db
-from core.db import init_db, add_document, list_resumes
-from core.db import init_db, add_document, list_resumes, add_job, add_application, list_jobs, get_resume_for_job
-
 import re
+
+from core.extract_text import extract_text
+from core.db import (
+    init_db,
+    add_document,
+    list_resumes,
+    add_job,
+    add_application,
+    list_jobs,
+    get_resume_for_job,
+    list_documents,
+    list_jobs_by_company,
+    list_jobs_for_resume,
+)
+
+
 
 def parse_company_role(message: str):
     """
@@ -40,6 +51,23 @@ def parse_company_role(message: str):
     return company.strip(), role.strip()
 
 
+
+def detect_intent(msg: str) -> str:
+    m = msg.lower().strip()
+
+    if "list resumes" in m or "show resumes" in m or "my resumes" in m:
+        return "LIST_RESUMES"
+
+    if "list jobs" in m and " at " in m:
+        return "LIST_JOBS_BY_COMPANY"
+
+    if "what resume did i use" in m or "which resume did i use" in m:
+        return "RESUME_FOR_JOB"
+
+    if "jobs did i use" in m and "resume" in m:
+        return "JOBS_FOR_RESUME"
+
+    return "UNKNOWN"
 
 
 st.set_page_config(page_title="Job Search Brain", layout="wide")
@@ -174,31 +202,132 @@ with tab_history:
             st.write(f"**{company} — {role}** | {status} | applied: {date_applied} | job_id: {job_id}")
 
 with tab_chat:
+    if "chat" not in st.session_state:
+        st.session_state.chat = []  # list of {"role": "user"/"bot", "content": str}
+
     st.subheader("Chatbot (Resume lookup)")
 
     st.write("Ask like: **What resume did I use for Salesforce Associate Product Manager**")
     st.write("Tip: You can also use: **for Salesforce - Associate Product Manager**")
 
-    user_msg = st.text_input("Your question", placeholder="What resume did I use for Salesforce Associate Product Manager?")
-
-    if st.button("Ask"):
-        company, role = parse_company_role(user_msg)
-
-        if not company or not role:
-            st.warning("I couldn't understand that. Try: `for <Company> - <Role>`")
+    for m in st.session_state.chat:
+        if m["role"] == "user":
+            st.markdown(f"**You:** {m['content']}")
         else:
-            result = get_resume_for_job(company, role)
+            st.markdown(f"**Bot:** {m['content']}")
 
-            if not result:
-                st.warning(f"No match found for company='{company}' and role='{role}'.")
+        # --- Download button area (Chatbot tab) ---
+    if "last_resume_found" not in st.session_state:
+        st.session_state.last_resume_found = None
+
+    if st.session_state.last_resume_found:
+        fp = st.session_state.last_resume_found["file_path"]
+        fn = st.session_state.last_resume_found["filename"]
+
+        st.info("Download the resume I found:")
+        with open(fp, "rb") as f:
+            st.download_button(
+                label=f"Download {fn}",
+                data=f,
+                file_name=fn,
+                mime="application/pdf" if fn.lower().endswith(".pdf") else "application/octet-stream",
+            )
+
+
+    st.divider()
+
+    user_msg = st.text_input("Type a message", placeholder="Try: list resumes")
+
+    if st.button("Send"):
+        if not user_msg.strip():
+            st.warning("Type something first.")
+        else:
+            # Save user message
+            st.session_state.chat.append({"role": "user", "content": user_msg})
+
+            intent = detect_intent(user_msg)
+
+            # 1) List resumes
+            if intent == "LIST_RESUMES":
+                resumes = list_resumes()
+                if not resumes:
+                    bot = "You have no resumes uploaded yet."
+                else:
+                    lines = ["Here are your uploaded resumes:"]
+                    for r in resumes:
+                        rid, filename, path, uploaded_at = r
+                        lines.append(f"- {filename} (id: {rid})")
+                    bot = "\n".join(lines)
+
+            # 2) List jobs by company: "list jobs at Salesforce"
+            elif intent == "LIST_JOBS_BY_COMPANY":
+                company = user_msg.lower().split(" at ", 1)[1].strip()
+                jobs = list_jobs_by_company(company)
+                if not jobs:
+                    bot = f"No jobs found for company: {company}"
+                else:
+                    lines = [f"Jobs at {company}:"]
+                    for j in jobs:
+                        jid, comp, role, date_applied, status, created_at = j
+                        lines.append(f"- {role} | {status} | applied: {date_applied}")
+                    bot = "\n".join(lines)
+
+            # 3) Resume used for a job
+            elif intent == "RESUME_FOR_JOB":
+                company, role = parse_company_role(user_msg)
+
+                if not company or not role:
+                    bot = "Try: `what resume did i use for Salesforce - Associate Product Manager`"
+                    st.session_state.last_resume_found = None   # ✅ clear
+
+                else:
+                    res = get_resume_for_job(company, role)
+
+                    if not res:
+                        bot = f"No resume found for {company} / {role}."
+                        st.session_state.last_resume_found = None   # ✅ clear
+
+                    else:
+                        filename, file_path = res
+                        bot = f"You used: {filename}"
+
+                        # ✅ save for download button rendering
+                        st.session_state.last_resume_found = {
+                            "filename": filename,
+                            "file_path": file_path
+                        }
+
+             
+
+            # 4) Jobs for a resume id: "what jobs did i use resume 1 for"
+            elif intent == "JOBS_FOR_RESUME":
+                m = re.search(r"resume\s+(\d+)", user_msg.lower())
+                if not m:
+                    bot = "Try: `what jobs did I use resume 1 for`"
+                else:
+                    resume_id = int(m.group(1))
+                    jobs = list_jobs_for_resume(resume_id)
+                    if not jobs:
+                        bot = f"No jobs found for resume id {resume_id}."
+                    else:
+                        lines = [f"Jobs that used resume id {resume_id}:"]
+                        for j in jobs:
+                            jid, comp, role, date_applied, status = j
+                            lines.append(f"- {comp} — {role} | {status} | applied: {date_applied}")
+                        bot = "\n".join(lines)
+
             else:
-                filename, file_path = result
-                st.success(f"You used: {filename}")
+                bot = (
+                    "I can help with:\n"
+                    "- `list resumes`\n"
+                    "- `list jobs at <company>`\n"
+                    "- `what resume did I use for <company> - <role>`\n"
+                    "- `what jobs did I use resume <id> for`"
+                )
 
-                with open(file_path, "rb") as f:
-                    st.download_button(
-                        label="Download that resume",
-                        data=f,
-                        file_name=filename,
-                        mime="application/pdf" if filename.lower().endswith(".pdf") else "application/octet-stream",
-                    )
+            # Save bot message
+            st.session_state.chat.append({"role": "bot", "content": bot})
+
+            # Re-render with new messages visible
+            st.rerun()
+
